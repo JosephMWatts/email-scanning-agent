@@ -133,12 +133,16 @@ class ImapSource(MailSource):
     def archive(self, message_id: str) -> None:
         """Remove from inbox by dropping the \\Inbox label. Survives in All Mail."""
         uid = self._resolve(message_id)
-        self._conn.uid("STORE", uid, "-X-GM-LABELS", r"(\Inbox)")
+        typ, _ = self._conn.uid("STORE", uid, "-X-GM-LABELS", r"(\Inbox)")
+        if typ != "OK":
+            raise RuntimeError(f"IMAP STORE failed archiving {message_id}: {typ}")
 
     def apply_label(self, message_id: str, label: str) -> None:
         """Tag a message, e.g. 'proposed-archive'. Gmail creates the label if new."""
         uid = self._resolve(message_id)
-        self._conn.uid("STORE", uid, "+X-GM-LABELS", '("%s")' % label)
+        typ, _ = self._conn.uid("STORE", uid, "+X-GM-LABELS", '("%s")' % label)
+        if typ != "OK":
+            raise RuntimeError(f"IMAP STORE failed labeling {message_id}: {typ}")
 
     def _resolve(self, message_id: str) -> bytes:
         """Map a Gmail message id to a UID in All Mail, which holds every message."""
