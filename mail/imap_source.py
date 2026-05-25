@@ -9,6 +9,7 @@ import imaplib
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime, parseaddr
 
@@ -22,6 +23,33 @@ _MSGID_RE = re.compile(rb"X-GM-MSGID\s+(\d+)")
 
 # Date format IMAP SEARCH expects, e.g. 25-May-2026.
 _IMAP_DATE = "%d-%b-%Y"
+
+# Tags whose text content is markup, not readable body, and must be dropped.
+_HTML_SKIP_TAGS = {"script", "style", "head", "title"}
+
+
+class _HtmlTextExtractor(HTMLParser):
+    """Collect visible text from an HTML body, skipping script/style markup."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._chunks = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in _HTML_SKIP_TAGS:
+            self._skip_depth += 1
+
+    def handle_endtag(self, tag):
+        if tag in _HTML_SKIP_TAGS and self._skip_depth > 0:
+            self._skip_depth -= 1
+
+    def handle_data(self, data):
+        if self._skip_depth == 0:
+            self._chunks.append(data)
+
+    def text(self) -> str:
+        return " ".join("".join(self._chunks).split())
 
 
 class ImapSource(MailSource):
@@ -155,16 +183,38 @@ class ImapSource(MailSource):
 
     @staticmethod
     def _body_text(msg) -> str:
-        """Return the raw plain-text body. Multipart: first text/plain part."""
+        """Return the body as plain text. Prefer text/plain; for HTML-only mail
+        fall back to readable text stripped from the text/html part."""
         if msg.is_multipart():
+            html_part = None
             for part in msg.walk():
-                if part.get_content_type() == "text/plain" and \
-                        "attachment" not in str(part.get("Content-Disposition", "")):
+                if "attachment" in str(part.get("Content-Disposition", "")):
+                    continue
+                ctype = part.get_content_type()
+                if ctype == "text/plain":
                     return ImapSource._decode_payload(part)
+                if ctype == "text/html" and html_part is None:
+                    html_part = part
+            if html_part is not None:
+                return ImapSource._html_to_text(ImapSource._decode_payload(html_part))
             return ""
-        if msg.get_content_type() == "text/plain":
+        ctype = msg.get_content_type()
+        if ctype == "text/plain":
             return ImapSource._decode_payload(msg)
+        if ctype == "text/html":
+            return ImapSource._html_to_text(ImapSource._decode_payload(msg))
         return ""
+
+    @staticmethod
+    def _html_to_text(html: str) -> str:
+        """Strip tags to readable text using the stdlib html.parser, so no new
+        dependency is needed. Drops script/style content and collapses runs."""
+        parser = _HtmlTextExtractor()
+        try:
+            parser.feed(html)
+        except Exception:
+            return ""
+        return parser.text()
 
     @staticmethod
     def _decode_payload(part) -> str:
