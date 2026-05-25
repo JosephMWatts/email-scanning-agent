@@ -1,0 +1,8 @@
+# Secrets — never commit the real credentials.
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
