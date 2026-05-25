@@ -5,9 +5,10 @@ Connects through the IMAP adapter, fetches a scope, summarizes each message,
 and writes one reviewable markdown digest into an Obsidian vault. It reads mail
 and writes the vault; it does not archive or label.
 
-This is a composition root: it is the only file allowed to name the concrete
-ImapSource and MarkdownVault adapters — criterion E1. The agent runtime
-receives a MailSource and a VaultStore by injection and never imports these.
+This is a composition root, one of the entry points where the concrete
+ImapSource and MarkdownVault adapters get named — criterion E1. The agent
+runtime receives a MailSource and a VaultStore by injection and never imports
+these.
 """
 
 import os
@@ -15,22 +16,12 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 
+from agent import summarize
 from mail.imap_source import ImapSource
 from vault.base import DigestRow
 from vault.markdown_vault import MarkdownVault
 
 SCOPE = {"since_days": 3, "folder": "INBOX"}
-
-# Target length of the per-message one-line summary, in characters.
-_SUMMARY_LEN = 160
-
-
-def _summarize(body_text: str) -> str:
-    """Collapse whitespace and truncate the body to a one-line summary."""
-    collapsed = " ".join(body_text.split())
-    if len(collapsed) <= _SUMMARY_LEN:
-        return collapsed
-    return collapsed[: _SUMMARY_LEN - 1].rstrip() + "…"
 
 
 def main() -> None:
@@ -45,7 +36,7 @@ def main() -> None:
     try:
         messages = source.fetch(SCOPE)
         rows = [
-            DigestRow(message=msg, summary=_summarize(msg.body_text))
+            DigestRow(message=msg, summary=summarize(msg.body_text))
             for msg in messages
         ]
         run_meta = {
