@@ -17,6 +17,9 @@ _AGENT_FOLDER = "Email Agent"
 # Rule-store file, relative to _AGENT_FOLDER, mapping senders to a rule.
 _SENDER_RULES_FILE = "Sender Rules.md"
 
+# Rolling review-queue file, relative to _AGENT_FOLDER, for unruled candidates.
+_REVIEW_QUEUE_FILE = "Review Queue.md"
+
 
 class MarkdownVault(VaultStore):
     """Filesystem implementation of the vault-write seam, one digest per scan."""
@@ -109,6 +112,17 @@ class MarkdownVault(VaultStore):
             fh.write(self._render(rows, run_meta))
         return os.path.abspath(path)
 
+    def write_review_queue(self, rows: list[DigestRow], run_meta: dict) -> str:
+        """Write the unruled candidates as a single rolling, hand-reviewable
+        markdown file. Return its absolute path. Overwrites on each call."""
+        agent_dir = os.path.join(self._root, _AGENT_FOLDER)
+        os.makedirs(agent_dir, exist_ok=True)
+        path = os.path.join(agent_dir, _REVIEW_QUEUE_FILE)
+
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(self._render_queue(rows, run_meta))
+        return os.path.abspath(path)
+
     # --- rendering -------------------------------------------------------
 
     def _render(self, rows: list[DigestRow], run_meta: dict) -> str:
@@ -141,6 +155,40 @@ class MarkdownVault(VaultStore):
                     self._cell(msg.date.strftime("%b %d")),
                     "yes" if msg.has_unsubscribe else "no",
                     self._cell(row.summary),
+                )
+            )
+        return "\n".join(lines) + "\n"
+
+    def _render_queue(self, rows: list[DigestRow], run_meta: dict) -> str:
+        ts = run_meta["timestamp"]
+        created = ts.strftime("%Y-%m-%d %H:%M")
+        count = len(rows)
+
+        lines = [
+            "---",
+            "type: email-agent-review-queue",
+            f"created: {created}",
+            f"messages: {count}",
+            "---",
+            "",
+            "# Review queue",
+            "",
+            f"Generated {created} · {count} messages to review",
+            "",
+            "- [ ] Reviewed, process this queue",
+            "",
+            "| Sender | Subject | Date | Summary | Your call |",
+            "|---|---|---|---|---|",
+        ]
+        for row in rows:
+            msg = row.message
+            lines.append(
+                "| {} | {} | {} | {} | {} |".format(
+                    self._cell(msg.sender),
+                    self._cell(msg.subject),
+                    self._cell(msg.date.strftime("%Y-%m-%d")),
+                    self._cell(row.summary),
+                    "",
                 )
             )
         return "\n".join(lines) + "\n"
