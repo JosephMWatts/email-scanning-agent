@@ -11,6 +11,12 @@ from vault.base import DigestRow, VaultStore
 # Subfolder, relative to the vault root, that collects scan digests.
 _SCANS_FOLDER = "Email Scans"
 
+# Subfolder, relative to the vault root, holding the agent's governance state.
+_AGENT_FOLDER = "Email Agent"
+
+# Rule-store file, relative to _AGENT_FOLDER, mapping senders to a rule.
+_SENDER_RULES_FILE = "Sender Rules.md"
+
 
 class MarkdownVault(VaultStore):
     """Filesystem implementation of the vault-write seam, one digest per scan."""
@@ -32,6 +38,60 @@ class MarkdownVault(VaultStore):
     def disconnect(self) -> None:
         """A filesystem store has nothing to close; kept for symmetry."""
         pass
+
+    # --- governance read -------------------------------------------------
+
+    def read_sender_rules(self) -> dict[str, str]:
+        """Return a mapping of full sender address to rule ("archive" or
+        "keep"), parsed from <vault root>/Email Agent/Sender Rules.md.
+
+        Strictly read-only: an absent rule store is a valid state and yields
+        an empty dict — no rules yet, every candidate treated as unknown. The
+        file is never created or written here. Sender addresses are lowercased
+        so later matching is case-insensitive. Rows whose rule cell is neither
+        "archive" nor "keep" are skipped. When a sender appears more than once
+        with conflicting rules, "keep" wins over "archive" (criterion C5)."""
+        path = os.path.join(self._root, _AGENT_FOLDER, _SENDER_RULES_FILE)
+        if not os.path.isfile(path):
+            return {}
+
+        rules: dict[str, str] = {}
+        with open(path, "r", encoding="utf-8") as fh:
+            in_section = False  # seen the "# Sender rules" heading yet?
+            header_seen = False  # consumed the table's header row yet?
+            for line in fh:
+                stripped = line.strip()
+                if not in_section:
+                    # Skip frontmatter and anything before the heading.
+                    if stripped.lower() == "# sender rules":
+                        in_section = True
+                    continue
+                if not stripped.startswith("|"):
+                    # Blank line or prose between heading and table; ignore.
+                    continue
+
+                cells = [c.strip() for c in stripped.strip("|").split("|")]
+                if not header_seen:
+                    # First table row is the column header; carries no rule.
+                    header_seen = True
+                    continue
+                if set("".join(cells)) <= {"-", ":"}:
+                    # The |---| separator row: no sender or rule.
+                    continue
+                if len(cells) < 2:
+                    continue
+
+                # Four columns — sender, rule, added, source — read first two.
+                sender = cells[0].lower()
+                rule = cells[1].lower()
+                if rule not in ("archive", "keep"):
+                    continue
+                # "keep" wins over "archive" on conflict; never downgrade.
+                if rules.get(sender) == "keep":
+                    continue
+                rules[sender] = rule
+
+        return rules
 
     # --- write -----------------------------------------------------------
 

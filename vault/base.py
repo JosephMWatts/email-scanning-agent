@@ -25,5 +25,11 @@ class VaultStore(ABC):
         count — and no per-message data."""
 
     @abstractmethod
+    def read_sender_rules(self) -> dict[str, str]:
+        """Return a mapping of full sender address to rule, where the rule is
+        "archive" or "keep". This is the governance-read half of the
+        bidirectional vault connection, criterion E3."""
+
+    @abstractmethod
     def disconnect(self) -> None:
         """Release handles. A filesystem store has nothing to close; kept for symmetry."""
