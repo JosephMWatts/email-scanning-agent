@@ -2,6 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Optional
 from mail.base import MailMessage
 
 
@@ -9,6 +10,21 @@ from mail.base import MailMessage
 class DigestRow:
     message: MailMessage
     summary: str
+
+
+@dataclass
+class ReviewQueueRow:
+    sender: str            # full address, e.g. news@stripe.com
+    subject: str
+    date: str              # ISO 8601 date
+    summary: str
+    your_call: str         # "" accepts the proposed action; "keep" overrides it
+
+
+@dataclass
+class ReviewQueue:
+    is_ready: bool                 # top-of-file "Reviewed, process this queue" box is checked
+    rows: list[ReviewQueueRow]
 
 
 class VaultStore(ABC):
@@ -32,10 +48,37 @@ class VaultStore(ABC):
         metadata only."""
 
     @abstractmethod
+    def append_rule(self, sender: str, rule: str, source: str) -> None:
+        """Append one exact-match sender rule to the sender-rules store,
+        creating the store on first call. The "added" date is stamped by the
+        implementation, not passed in. rule must be in the V1 two-action
+        vocabulary {"archive", "keep"}; anything else raises ValueError. This
+        is the governance-write half of Flow B, criterion C3."""
+
+    @abstractmethod
     def read_sender_rules(self) -> dict[str, str]:
         """Return a mapping of full sender address to rule, where the rule is
         "archive" or "keep". This is the governance-read half of the
         bidirectional vault connection, criterion E3."""
+
+    @abstractmethod
+    def read_review_queue(self) -> ReviewQueue:
+        """Read back the hand-reviewed queue written by write_review_queue.
+        is_ready reflects the top-of-file "- [ ] Reviewed, process this queue"
+        checkbox: True only when checked. Each row carries the human's verdict
+        in your_call — "" means accept the proposed action, "keep" overrides it.
+        This is the action-read half of the bidirectional vault connection,
+        criterion C3."""
+
+    @abstractmethod
+    def rotate_review_queue(self) -> Optional[str]:
+        """Retire the canonical review queue off the active path so the next
+        Flow A run starts from a clean slate without clobbering the operator's
+        signed-off queue. Return the new identifier of the rotated file on
+        success, or None if there is no queue to rotate (clean no-op, not an
+        error). Raises on rotation failure — target collision or I/O error —
+        which must not be swallowed. This is the queue-retire half of the
+        lifecycle, called by Flow B after successful processing."""
 
     @abstractmethod
     def disconnect(self) -> None:
