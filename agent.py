@@ -8,6 +8,7 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import sys
 
 from mail.base import MailMessage, MailSource
 from vault.base import DigestRow, VaultStore
@@ -95,3 +96,77 @@ def run(source: MailSource, vault: VaultStore, scope: dict) -> dict:
         "queued": len(classified.to_queue),
         "review_queue_path": queue_path,
     }
+
+
+def run_flow_b(vault: VaultStore) -> dict:
+    """Drive Flow B: process the operator-approved review queue into sender
+    rules, then retire the queue.
+
+    Reads the queue through the VaultStore seam (criterion E1) — no concrete
+    adapter or path knowledge here. ``vault`` is connected here and disconnected
+    in a finally, mirroring Flow A, so a failure mid-run still releases handles.
+    If the queue is not marked ready, this is a clean no-op: the operator has
+    not signed off, so nothing is written or rotated. When ready, each row's
+    ``your_call`` verdict becomes a sender rule — blank means "yes, archive it"
+    since Phase 1 only queues archive candidates (Lesson 44) — appended via
+    ``append_rule``. Unrecognized verdicts are skipped and logged, not guessed.
+    After the loop the queue is rotated off the active path so the next scan
+    starts clean. Vault errors (read failure, append ValueError/RuntimeError,
+    rotate FileExistsError) propagate: they are integrity signals the operator
+    should see."""
+    vault.connect()
+    try:
+        queue = vault.read_review_queue()
+
+        if not queue.is_ready:
+            print("Flow B: queue not ready, no-op", file=sys.stderr)
+            return {
+                "is_ready": False,
+                "rows_processed": 0,
+                "rows_skipped": 0,
+                "rules_appended": [],
+                "rotated_to": None,
+            }
+
+        rules_appended: list[tuple[str, str]] = []
+        skipped = 0
+        for row in queue.rows:
+            verdict = row.your_call.strip().lower()
+            if verdict in ("", "archive"):
+                # Blank accepts the proposed default; Phase 1 only queues
+                # archive candidates, so "yes" means archive (Lesson 44).
+                rule = "archive"
+            elif verdict == "keep":
+                rule = "keep"
+            else:
+                print(
+                    f"Flow B: skipping row for {row.sender}: unrecognized "
+                    f"your_call value {row.your_call!r}, expected blank, "
+                    f"'archive', or 'keep'",
+                    file=sys.stderr,
+                )
+                skipped += 1
+                continue
+
+            vault.append_rule(
+                sender=row.sender, rule=rule, source="phase 1 approval"
+            )
+            rules_appended.append((row.sender, rule))
+
+        rotated_to = vault.rotate_review_queue()
+
+        print(
+            f"Flow B: ready=True, processed={len(rules_appended)}, "
+            f"skipped={skipped}, rotated_to={rotated_to}",
+            file=sys.stderr,
+        )
+
+        return {
+            "is_ready": True,
+            "rows_processed": len(rules_appended),
+            "rows_skipped": skipped,
+            "rules_appended": rules_appended,
+            "rotated_to": rotated_to,
+        }
+    finally:
+        vault.disconnect()
