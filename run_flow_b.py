@@ -11,11 +11,16 @@ receives a VaultStore by injection and never imports it.
 """
 
 import os
+from datetime import datetime
 
 from dotenv import load_dotenv
 
 import agent
+import harness
 from vault.markdown_vault import MarkdownVault
+
+AGENT_ID = "email-scanner-flow-b"
+AGENT_VERSION = "1.0.0"
 
 
 def main() -> None:
@@ -24,7 +29,54 @@ def main() -> None:
 
     vault = MarkdownVault(vault_path)
 
-    result = agent.run_flow_b(vault)
+    started_at = datetime.now().astimezone()
+    try:
+        result = agent.run_flow_b(vault)
+    except Exception as e:
+        harness.write_run_log(
+            vault_path=vault_path,
+            agent_id=AGENT_ID,
+            agent_version=AGENT_VERSION,
+            started_at=started_at,
+            completed_at=datetime.now().astimezone(),
+            status="failed",
+            trigger="manual",
+            input_summary="review queue",
+            output_summary="",
+            output_paths=[],
+            error=str(e),
+            parent_run_id=None,
+        )
+        raise
+    completed_at = datetime.now().astimezone()
+
+    if not result["is_ready"]:
+        output_summary = "queue not ready, no-op"
+        output_paths: list[str] = []
+    else:
+        output_summary = (
+            f"{result['rows_processed']} rules appended, "
+            f"{result['rows_skipped']} rows skipped"
+        )
+        output_paths = []
+        if result["rules_appended"]:
+            output_paths.append("Email Agent/Sender Rules.md")
+        if result["rotated_to"]:
+            output_paths.append(result["rotated_to"])
+
+    harness.write_run_log(
+        vault_path=vault_path,
+        agent_id=AGENT_ID,
+        agent_version=AGENT_VERSION,
+        started_at=started_at,
+        completed_at=completed_at,
+        status="success",
+        trigger="manual",
+        input_summary="review queue",
+        output_summary=output_summary,
+        output_paths=output_paths,
+        parent_run_id=None,
+    )
 
     if not result["is_ready"]:
         print("Flow B: queue not ready, no-op.")
