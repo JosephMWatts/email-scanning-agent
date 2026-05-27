@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 HOST = "personal"
 
 
@@ -54,6 +54,7 @@ def write_run_log(
     parent_run_id: str | None = None,
     tags: list[str] | None = None,
     notes: str = "",
+    model_id: str | None = None,
 ) -> str:
     """Write a v1 harness run-log to <vault_path>/Agent Runs/. Returns the path written."""
     tags = tags or []
@@ -73,12 +74,14 @@ def write_run_log(
 
     error_field = "null" if error is None else _yaml_quote(error)
     parent_field = "null" if parent_run_id is None else _yaml_quote(parent_run_id)
+    model_field = "null" if model_id is None else _yaml_quote(model_id)
 
     frontmatter = (
         "---\n"
         f"schema_version: {SCHEMA_VERSION}\n"
         f"agent_id: {agent_id}\n"
         f"agent_version: {agent_version}\n"
+        f"model_id: {model_field}\n"
         f"run_id: {run_id}\n"
         f"parent_run_id: {parent_field}\n"
         f"host: {HOST}\n"
