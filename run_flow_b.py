@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""Flow B entry point — process the operator-approved review queue.
+
+Reads the hand-reviewed queue from the Obsidian vault, turns each approved row
+into a sender rule, and retires the queue so the next scan starts clean —
+criterion C3. Flow B never touches mail: it works only against the vault.
+
+This is a composition root, one of the entry points where the concrete
+MarkdownVault adapter gets named — criterion E1. The agent runtime in agent.py
+receives a VaultStore by injection and never imports it.
+"""
+
+import os
+
+from dotenv import load_dotenv
+
+import agent
+from vault.markdown_vault import MarkdownVault
+
+
+def main() -> None:
+    load_dotenv()
+    vault_path = os.environ["VAULT_PATH"]
+
+    vault = MarkdownVault(vault_path)
+
+    result = agent.run_flow_b(vault)
+
+    if not result["is_ready"]:
+        print("Flow B: queue not ready, no-op.")
+        return
+
+    print("Flow B run: queue ready")
+    print(f"Processed: {result['rows_processed']}")
+    print(f"Skipped:   {result['rows_skipped']}")
+    print(f"Rotated:   {result['rotated_to']}")
+    if result['rules_appended']:
+        print("Rules appended:")
+        for sender, rule in result['rules_appended']:
+            print(f"  {sender} -> {rule}")
+
+
+if __name__ == "__main__":
+    main()
