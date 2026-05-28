@@ -55,6 +55,8 @@ def write_run_log(
     tags: list[str] | None = None,
     notes: str = "",
     model_id: str | None = None,
+    token_cost_input: int | None = None,
+    token_cost_output: int | None = None,
 ) -> str:
     """Write a v1 harness run-log to <vault_path>/Agent Runs/. Returns the path written."""
     tags = tags or []
@@ -75,6 +77,8 @@ def write_run_log(
     error_field = "null" if error is None else _yaml_quote(error)
     parent_field = "null" if parent_run_id is None else _yaml_quote(parent_run_id)
     model_field = "null" if model_id is None else _yaml_quote(model_id)
+    token_in_field = "null" if token_cost_input is None else str(token_cost_input)
+    token_out_field = "null" if token_cost_output is None else str(token_cost_output)
 
     frontmatter = (
         "---\n"
@@ -93,8 +97,8 @@ def write_run_log(
         f"input_summary: {_yaml_quote(input_summary)}\n"
         f"output_summary: {_yaml_quote(output_summary)}\n"
         f"output_paths:{_yaml_list(rel_paths)}\n"
-        "token_cost_input: null\n"
-        "token_cost_output: null\n"
+        f"token_cost_input: {token_in_field}\n"
+        f"token_cost_output: {token_out_field}\n"
         f"tags:{_yaml_list(tags)}\n"
         f"error: {error_field}\n"
         f"notes: {_yaml_quote(notes)}\n"
