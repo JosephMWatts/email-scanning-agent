@@ -137,8 +137,12 @@ class MarkdownVault(VaultStore):
         for num, line in enumerate(lines, start=1):
             stripped = line.strip()
             if not in_table:
-                if stripped.lower().startswith("| sender |"):
-                    in_table = True
+                # Parse the row to find the header by first-cell value, so any
+                # column padding (Advanced Tables, manual alignment) still matches.
+                if stripped.startswith("|"):
+                    cells = [c.strip() for c in stripped.strip("|").split("|")]
+                    if cells and cells[0].lower() == "sender":
+                        in_table = True
                 continue
             if not stripped.startswith("|"):
                 # First non-pipe line ends the table.
@@ -248,9 +252,12 @@ class MarkdownVault(VaultStore):
         # heading, and frontmatter are left untouched.
         header_idx = None
         for i, line in enumerate(lines):
-            if line.strip().lower().startswith("| sender |"):
-                header_idx = i
-                break
+            stripped = line.strip()
+            if stripped.startswith("|"):
+                cells = [c.strip() for c in stripped.strip("|").split("|")]
+                if cells and cells[0].lower() == "sender":
+                    header_idx = i
+                    break
         if header_idx is None:
             raise RuntimeError(
                 f"no recognizable '| Sender |' table header in {path}"
