@@ -26,6 +26,7 @@ AGENT_VERSION = "1.0.0"
 def main() -> None:
     load_dotenv()
     vault_path = os.environ["VAULT_PATH"]
+    trigger = os.environ.get("TRIGGER", "manual")
 
     vault = MarkdownVault(vault_path)
 
@@ -40,7 +41,7 @@ def main() -> None:
             started_at=started_at,
             completed_at=datetime.now().astimezone(),
             status="failed",
-            trigger="manual",
+            trigger=trigger,
             input_summary="review queue",
             output_summary="",
             output_paths=[],
@@ -71,7 +72,7 @@ def main() -> None:
         started_at=started_at,
         completed_at=completed_at,
         status="success",
-        trigger="manual",
+        trigger=trigger,
         input_summary="review queue",
         output_summary=output_summary,
         output_paths=output_paths,

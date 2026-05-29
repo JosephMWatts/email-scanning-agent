@@ -30,6 +30,10 @@ AGENT_VERSION = "1.0.0"
 def main() -> None:
     load_dotenv()
     vault_path = os.environ["VAULT_PATH"]
+    # Read at startup so failure and success paths see the same value. Default
+    # "manual" preserves today's hand-fired cadence; a future launchd plist
+    # would set TRIGGER=scheduled in EnvironmentVariables to flip this.
+    trigger = os.environ.get("TRIGGER", "manual")
 
     source = ImapSource()
     vault = MarkdownVault(vault_path)
@@ -47,7 +51,7 @@ def main() -> None:
             started_at=started_at,
             completed_at=datetime.now().astimezone(),
             status="failed",
-            trigger="manual",
+            trigger=trigger,
             input_summary=input_summary,
             output_summary="",
             output_paths=[],
@@ -68,7 +72,7 @@ def main() -> None:
         started_at=started_at,
         completed_at=completed_at,
         status="success",
-        trigger="manual",
+        trigger=trigger,
         input_summary=input_summary,
         output_summary=output_summary,
         output_paths=[result["review_queue_path"]],
