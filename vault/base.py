@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Protocol
 from mail.base import MailMessage
 
 
@@ -10,6 +10,33 @@ from mail.base import MailMessage
 class DigestRow:
     message: MailMessage
     summary: str
+
+
+@dataclass
+class CalendarProposalRow:
+    """One propose-only calendar event awaiting operator approval. Carries
+    enough provenance for the operator to decide without opening the email."""
+
+    subject: str           # proposed event title
+    proposed_time: str     # human-readable start–end (or all-day)
+    confidence: float      # 0.0–1.0, the extractor's meeting-intent confidence
+    conflict: str          # conflicting event titles, "; "-joined; "" if clear
+    source_sender: str     # the email that triggered the proposal
+    source_subject: str    # that email's subject line
+
+
+class ProposalsSink(Protocol):
+    """Write-only seam for the calendar agent's propose-only output. Kept
+    separate from VaultStore so the email-scan contract stays free of calendar
+    concerns; MarkdownVault structurally satisfies both (criterion E1)."""
+
+    def write_calendar_proposals(
+        self, rows: list["CalendarProposalRow"], run_meta: dict
+    ) -> str:
+        """Write the propose-only calendar events as one hand-reviewable
+        markdown file and return the absolute path written. run_meta carries
+        run-level metadata only — timestamp, scope, event count."""
+        ...
 
 
 @dataclass

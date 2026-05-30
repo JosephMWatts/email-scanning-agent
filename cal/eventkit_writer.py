@@ -136,10 +136,9 @@ class EventKitWriter(CalendarWriter):
             "calendar_name": ref.title,
             "calendar_source": ref.source,
         }
-        # NOTE (verification gate): che-ical's check_conflicts response shape
-        # needs confirmation by a live call. Expected to be either a top-level
-        # list of overlapping events or a dict envelope with a "conflicts" key.
-        # Adjust the parse below once the live shape is observed.
+        # che-ical-mcp v1.10.0 returns either a top-level list of overlapping
+        # events or a dict envelope with a "conflicts" key — both handled below
+        # (response shape verified against the binary on 2026-05-30).
         raw = self._invoke("check_conflicts", args)
         conflicts_raw = raw if isinstance(raw, list) else raw.get("conflicts", [])
         conflicts = [self._event_from_raw(c) for c in conflicts_raw]
@@ -153,9 +152,9 @@ class EventKitWriter(CalendarWriter):
             return EventResult(event_id=None, status="failed", error=str(e))
         event_id = raw.get("id") if isinstance(raw, dict) else None
         if not event_id:
-            # NOTE (verification gate): exact response shape on success needs
-            # live confirmation. che-ical may return {"id": "..."} or wrap it
-            # in {"event": {"id": ...}} or similar. Adjust extraction here.
+            # che-ical-mcp v1.10.0 returns {"id": "..."} on success (verified
+            # against the binary on 2026-05-30), so a missing id is a real
+            # failure, not an unhandled response shape.
             return EventResult(
                 event_id=None,
                 status="failed",

@@ -9,9 +9,11 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 import sys
+from typing import Optional, Protocol
 
+from cal.base import CalendarEvent, CalendarWriter
 from mail.base import MailMessage, MailSource
-from vault.base import DigestRow, VaultStore
+from vault.base import CalendarProposalRow, DigestRow, ProposalsSink, VaultStore
 
 # Target length of the per-message one-line summary, in characters.
 _SUMMARY_LEN = 160
@@ -170,3 +172,235 @@ def run_flow_b(vault: VaultStore) -> dict:
         }
     finally:
         vault.disconnect()
+
+
+# --- A6: calendar runtime (meeting-intent → calendar write) ------------------
+#
+# Section A6. Same adapter-agnostic posture as run()/run_flow_b() (criterion
+# E1): speaks only the MailSource, CalendarWriter, MeetingExtractor and
+# ProposalsSink contracts, never a concrete adapter. The composition root
+# (run_calendar_agent.py) injects the concrete ImapSource, EventKitWriter,
+# ClaudeMeetingExtractor and MarkdownVault.
+
+
+@dataclass
+class MeetingIntent:
+    """The decide-step's structured output for one message. has_meeting False
+    means 'no calendar-worthy event here' and the runtime skips the message.
+    start/end are timezone-aware when has_meeting is True."""
+
+    has_meeting: bool
+    title: Optional[str] = None
+    start: Optional[datetime] = None
+    end: Optional[datetime] = None
+    all_day: bool = False
+    location: Optional[str] = None
+    url: Optional[str] = None
+    attendees: list[str] = field(default_factory=list)
+    confidence_score: float = 0.0   # the extractor's own 0.0–1.0 intent confidence
+
+
+@dataclass
+class CalendarOutcome:
+    """Per-message result after gating and the write attempt. The post-action
+    analogue of Classification's buckets: every fetched message lands in exactly
+    one disposition."""
+
+    message: MailMessage
+    intent: MeetingIntent
+    disposition: str                # "created" | "proposed" | "conflict" | "skipped" | "failed"
+    event_id: Optional[str] = None  # set when disposition == "created"
+    conflict_titles: list[str] = field(default_factory=list)
+    error: Optional[str] = None     # set when disposition == "failed"
+
+
+class MeetingExtractor(Protocol):
+    """The decide-step seam. run_calendar speaks only this contract; the
+    concrete ClaudeMeetingExtractor (llm/) is injected by the composition root
+    (criterion E1)."""
+
+    model_id: str
+
+    def extract(self, message: MailMessage) -> MeetingIntent:
+        """Return the meeting-intent extracted from one message."""
+        ...
+
+    def usage(self) -> tuple[int, int]:
+        """Cumulative (input_tokens, output_tokens) across the run, for the
+        harness v2 token-cost fields."""
+        ...
+
+
+def _event_from_intent(
+    intent: MeetingIntent, message: MailMessage, calendar_id: str
+) -> CalendarEvent:
+    """Build the transport-agnostic CalendarEvent from an extracted intent,
+    carrying the provenance back to the triggering email."""
+    return CalendarEvent(
+        title=intent.title or message.subject,
+        start=intent.start,
+        end=intent.end,
+        calendar_id=calendar_id,
+        all_day=intent.all_day,
+        location=intent.location,
+        url=intent.url,
+        attendees=intent.attendees,
+        confidence_score=intent.confidence_score,
+        source_email_id=message.message_id,
+        source_email_subject=message.subject,
+    )
+
+
+def _format_proposed_time(intent: MeetingIntent) -> str:
+    """Human-readable start–end for the proposal row."""
+    if intent.all_day:
+        return (
+            intent.start.strftime("%Y-%m-%d") + " (all day)"
+            if intent.start
+            else "all day"
+        )
+    if intent.start and intent.end:
+        return (
+            intent.start.strftime("%Y-%m-%d %H:%M")
+            + "–"
+            + intent.end.strftime("%H:%M")
+        )
+    if intent.start:
+        return intent.start.strftime("%Y-%m-%d %H:%M")
+    return "unspecified"
+
+
+def _proposal_row(outcome: CalendarOutcome) -> CalendarProposalRow:
+    """Translate a proposed/conflict outcome into a reviewable proposal row."""
+    intent = outcome.intent
+    return CalendarProposalRow(
+        subject=intent.title or outcome.message.subject,
+        proposed_time=_format_proposed_time(intent),
+        confidence=intent.confidence_score,
+        conflict="; ".join(outcome.conflict_titles),
+        source_sender=outcome.message.sender,
+        source_subject=outcome.message.subject,
+    )
+
+
+def run_calendar(
+    source: MailSource,
+    writer: CalendarWriter,
+    llm: MeetingExtractor,
+    scope: dict,
+    confidence_threshold: float,
+    target_calendar_id: str,
+    proposals_sink: ProposalsSink,
+) -> dict:
+    """Drive one calendar run: fetch the scope, extract meeting-intent per
+    message via the injected LLM, gate on confidence and conflicts, create the
+    high-confidence conflict-free events, and route the rest to propose-only.
+
+    ``source``, ``writer``, ``llm`` and ``proposals_sink`` are abstract
+    contracts injected by the composition root (criterion E1). ``source`` and
+    ``writer`` are connected here and disconnected in a finally — mirroring
+    run()/run_flow_b() — so a failure mid-run still releases handles.
+
+    Gating policy, in order: a message with no meeting-intent is skipped; one
+    below ``confidence_threshold`` is proposed, never auto-created; one whose
+    extracted start time is null is proposed (the tool-call schema permits a
+    null start even when has_meeting is True, so this is caught defensively
+    rather than trusting the prompt); one that conflicts with an existing event
+    is proposed with the conflicting titles attached, never written over
+    (propose-only-on-conflict). Only a high-confidence, timed, conflict-free
+    event is created.
+
+    Unlike run()'s fail-fast archive loop, a per-event create_event failure is
+    captured as a "failed" outcome rather than raised: one malformed event must
+    not abort the whole batch. Connect/fetch failures still propagate.
+
+    Returns the run's counts, the created-event ids, the proposal-file path (or
+    None), and the model/token fields the harness v2 schema records."""
+    source.connect()
+    writer.connect()
+    try:
+        messages = source.fetch(scope)
+
+        outcomes: list[CalendarOutcome] = []
+        for message in messages:
+            intent = llm.extract(message)
+
+            if not intent.has_meeting:
+                outcomes.append(CalendarOutcome(message, intent, "skipped"))
+                continue
+
+            if intent.confidence_score < confidence_threshold:
+                # Below the bar: surface for the operator, never auto-create.
+                outcomes.append(CalendarOutcome(message, intent, "proposed"))
+                continue
+
+            if intent.start is None:
+                # The tool-call schema permits a null start even when
+                # has_meeting is True; the system prompt alone is not a
+                # guarantee. A timeless event can't be created or conflict-
+                # checked, so surface it for the operator instead.
+                outcomes.append(CalendarOutcome(message, intent, "proposed"))
+                continue
+
+            event = _event_from_intent(intent, message, target_calendar_id)
+            report = writer.check_conflicts(event)
+            if report.conflicts:
+                # Propose-only-on-conflict: never write over an existing event.
+                outcomes.append(
+                    CalendarOutcome(
+                        message,
+                        intent,
+                        "conflict",
+                        conflict_titles=[c.title for c in report.conflicts],
+                    )
+                )
+                continue
+
+            result = writer.create_event(event)
+            if result.status == "created":
+                outcomes.append(
+                    CalendarOutcome(
+                        message, intent, "created", event_id=result.event_id
+                    )
+                )
+            else:
+                # Captured, not raised — one bad event must not abort the batch.
+                outcomes.append(
+                    CalendarOutcome(
+                        message, intent, "failed", error=result.error
+                    )
+                )
+
+        proposal_rows = [
+            _proposal_row(o)
+            for o in outcomes
+            if o.disposition in ("proposed", "conflict")
+        ]
+        proposal_path: Optional[str] = None
+        if proposal_rows:
+            run_meta = {
+                "timestamp": datetime.now(),
+                "scope": scope,
+                "count": len(proposal_rows),
+            }
+            proposal_path = proposals_sink.write_calendar_proposals(
+                proposal_rows, run_meta
+            )
+    finally:
+        writer.disconnect()
+        source.disconnect()
+
+    created = [o for o in outcomes if o.disposition == "created"]
+    in_tokens, out_tokens = llm.usage()
+    return {
+        "fetched": len(messages),
+        "created": len(created),
+        "proposed": len(proposal_rows),
+        "skipped": sum(o.disposition == "skipped" for o in outcomes),
+        "failed": sum(o.disposition == "failed" for o in outcomes),
+        "created_event_ids": [o.event_id for o in created],
+        "proposal_path": proposal_path,
+        "model_id": llm.model_id,
+        "token_cost_input": in_tokens,
+        "token_cost_output": out_tokens,
+    }

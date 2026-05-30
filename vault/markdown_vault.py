@@ -10,6 +10,7 @@ import sys
 from typing import Optional
 
 from vault.base import (
+    CalendarProposalRow,
     DigestRow,
     ReviewQueue,
     ReviewQueueRow,
@@ -27,6 +28,13 @@ _SENDER_RULES_FILE = "Sender Rules.md"
 
 # Rolling review-queue file, relative to _AGENT_FOLDER, for unruled candidates.
 _REVIEW_QUEUE_FILE = "Review Queue.md"
+
+# Subfolder, relative to the vault root, holding the calendar agent's output.
+_CALENDAR_FOLDER = "Calendar Agent"
+
+# Rolling propose-only file, relative to _CALENDAR_FOLDER, for events the
+# operator must approve before they are created.
+_PROPOSALS_FILE = "Proposed Events.md"
 
 
 class MarkdownVault(VaultStore):
@@ -200,6 +208,21 @@ class MarkdownVault(VaultStore):
             fh.write(self._render_queue(rows, run_meta))
         return os.path.abspath(path)
 
+    def write_calendar_proposals(
+        self, rows: list[CalendarProposalRow], run_meta: dict
+    ) -> str:
+        """Write the calendar agent's propose-only events as a single rolling,
+        hand-reviewable markdown file under <vault root>/Calendar Agent/. Return
+        its absolute path. Overwrites on each call, mirroring write_review_queue.
+        Satisfies the ProposalsSink seam (criterion E1)."""
+        cal_dir = os.path.join(self._root, _CALENDAR_FOLDER)
+        os.makedirs(cal_dir, exist_ok=True)
+        path = os.path.join(cal_dir, _PROPOSALS_FILE)
+
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(self._render_proposals(rows, run_meta))
+        return os.path.abspath(path)
+
     def append_rule(self, sender: str, rule: str, source: str) -> None:
         """Append one exact-match rule to <vault root>/Email Agent/Sender
         Rules.md, creating the file on first call. The "added" date is stamped
@@ -362,6 +385,44 @@ class MarkdownVault(VaultStore):
                     self._cell(msg.date.strftime("%Y-%m-%d")),
                     self._cell(row.summary),
                     "",
+                )
+            )
+        return "\n".join(lines) + "\n"
+
+    def _render_proposals(
+        self, rows: list[CalendarProposalRow], run_meta: dict
+    ) -> str:
+        ts = run_meta["timestamp"]
+        created = ts.strftime("%Y-%m-%d %H:%M")
+        count = len(rows)
+
+        lines = [
+            "---",
+            "type: calendar-agent-proposals",
+            f"created: {created}",
+            f"events: {count}",
+            "---",
+            "",
+            "# Proposed events",
+            "",
+            f"Generated {created} · {count} proposed event(s) to review",
+            "",
+            "Check the box to approve; a future run creates the approved events.",
+            "",
+            "| Create? | Subject | Proposed time | Confidence | Conflict "
+            "| Source sender | Source subject |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for row in rows:
+            lines.append(
+                "| {} | {} | {} | {} | {} | {} | {} |".format(
+                    "[ ]",
+                    self._cell(row.subject),
+                    self._cell(row.proposed_time),
+                    self._cell(f"{row.confidence:.2f}"),
+                    self._cell(row.conflict),
+                    self._cell(row.source_sender),
+                    self._cell(row.source_subject),
                 )
             )
         return "\n".join(lines) + "\n"
