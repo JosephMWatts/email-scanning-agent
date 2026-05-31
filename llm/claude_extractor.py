@@ -14,7 +14,7 @@ from datetime import datetime
 
 import anthropic
 
-from agent import MeetingIntent
+from agent import ExtractionError, MeetingIntent
 from mail.base import MailMessage
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -103,22 +103,56 @@ class ClaudeMeetingExtractor:
         return (self._input_tokens, self._output_tokens)
 
     def extract(self, message: MailMessage) -> MeetingIntent:
-        response = self._client.messages.create(
-            model=self.model_id,
-            max_tokens=1024,
-            system=[
-                {
-                    "type": "text",
-                    "text": _SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            tools=[_TOOL],
-            tool_choice={"type": "tool", "name": "record_meeting_intent"},
-            messages=[{"role": "user", "content": self._render_email(message)}],
-        )
+        # Translate the SDK's curated transient faults into the neutral
+        # ExtractionError so run_calendar can capture-don't-raise without
+        # importing anthropic (criterion E1). Permanent faults propagate raw.
+        try:
+            response = self._client.messages.create(
+                model=self.model_id,
+                max_tokens=1024,
+                system=[
+                    {
+                        "type": "text",
+                        "text": _SYSTEM_PROMPT,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                tools=[_TOOL],
+                tool_choice={"type": "tool", "name": "record_meeting_intent"},
+                messages=[
+                    {"role": "user", "content": self._render_email(message)}
+                ],
+            )
+        except anthropic.APIConnectionError as e:
+            # Network down, DNS failure, client-side timeout (APITimeoutError is
+            # a subclass). No status_code; always recoverable next run.
+            raise ExtractionError(
+                f"transient API connection error: {e}"
+            ) from e
+        except anthropic.APIStatusError as e:
+            # 429 rate-limited and any 5xx (500-599, which includes 529
+            # overloaded) are recoverable next run, so capture for retry.
+            # Everything else — 400 bad-request, 401/403 auth, 404, 422 — is a
+            # config or code fault that propagates raw so one error aborts the
+            # run loudly instead of marking every message failed. Matched by
+            # numeric status_code, not class: OverloadedError (529) is not
+            # exported at the anthropic top level in the pinned SDK.
+            if e.status_code == 429 or e.status_code >= 500:
+                raise ExtractionError(
+                    f"transient API status {e.status_code}: {e}"
+                ) from e
+            raise
+        # Usage is accumulated after a successful call and before parsing, so a
+        # parse-time defect still bills the tokens the call really spent.
         self._accumulate_usage(response.usage)
-        return self._intent_from_payload(self._tool_payload(response))
+        try:
+            return self._intent_from_payload(self._tool_payload(response))
+        except (RuntimeError, ValueError) as e:
+            # The model returned no record_meeting_intent tool call, or a
+            # timestamp datetime.fromisoformat can't parse. A single garbage
+            # extraction is captured, not raised — same posture as a transient
+            # fault, so one bad response doesn't abort the batch.
+            raise ExtractionError(f"model-output defect: {e}") from e
 
     # --- internals ----------------------------------------------------------
 

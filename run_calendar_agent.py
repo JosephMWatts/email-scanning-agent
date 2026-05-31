@@ -186,17 +186,42 @@ def main() -> None:
     # literal. Empty list when nothing was proposed.
     output_paths = [result["proposal_path"]] if result["proposal_path"] else []
 
+    # DP2(b) all-failed/zero-progress guard. run_calendar captures a per-message
+    # extract failure as a "failed" outcome and returns normally, so a batch
+    # where every extract failed lands here, not on the except path above.
+    # Logging status="success" would let harness.read_last_success advance the
+    # dynamic watermark past a window nothing was actually processed in,
+    # silently dropping those messages. Hold the watermark by logging
+    # status="failed" when failures occurred and nothing progressed; the next
+    # run re-fetches the same window and cross-run dedup absorbs the re-proposed
+    # successes. "progressed" excludes duplicates: a dedup-skip needs no retry
+    # but must not mask a co-occurring failure. A single failure amid progress
+    # still succeeds and the failed count stays visible in output_summary.
+    progressed = result["created"] + result["proposed"] + result["skipped"]
+    run_status = harness.compute_run_status(
+        progressed=progressed, failed=result["failed"]
+    )
+    run_error = None
+    if run_status == "failed":
+        run_error = (
+            f"all {result['failed']} extract attempt(s) failed with no "
+            f"successful extraction; watermark held so the next run re-fetches "
+            f"this window"
+        )
+        print(run_error, file=sys.stderr)
+
     harness.write_run_log(
         vault_path=vault_path,
         agent_id=AGENT_ID,
         agent_version=AGENT_VERSION,
         started_at=started_at,
         completed_at=completed_at,
-        status="success",
+        status=run_status,
         trigger=trigger,
         input_summary=input_summary,
         output_summary=output_summary,
         output_paths=output_paths,
+        error=run_error,
         parent_run_id=None,  # V1: standalone run — see the failed-path comment.
         notes=note,
         model_id=result["model_id"],

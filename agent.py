@@ -214,6 +214,21 @@ class CalendarOutcome:
     error: Optional[str] = None     # set when disposition == "failed"
 
 
+class ExtractionError(Exception):
+    """Raised by a MeetingExtractor when an extract() attempt fails in a way the
+    runtime should capture-don't-raise rather than abort the batch on: a
+    transient backend fault (rate limit, network, timeout, 5xx/overloaded) or a
+    model-output defect (no tool call returned, an unparseable timestamp).
+
+    This is the neutral seam exception. The concrete extractor translates its
+    backend-specific exceptions (e.g. the Anthropic SDK's) into this type so
+    run_calendar stays adapter-agnostic (criterion E1) and never imports a
+    vendor SDK to name the exceptions it catches. Permanent faults — bad API
+    key, malformed request — are deliberately NOT wrapped as ExtractionError:
+    they propagate raw so one config or code error aborts the run loudly instead
+    of marking every message 'failed'."""
+
+
 class MeetingExtractor(Protocol):
     """The decide-step seam. run_calendar speaks only this contract; the
     concrete ClaudeMeetingExtractor (llm/) is injected by the composition root
@@ -222,7 +237,9 @@ class MeetingExtractor(Protocol):
     model_id: str
 
     def extract(self, message: MailMessage) -> MeetingIntent:
-        """Return the meeting-intent extracted from one message."""
+        """Return the meeting-intent extracted from one message. Raises
+        ExtractionError for a transient or model-output failure the runtime
+        should capture as a 'failed' outcome; permanent faults propagate raw."""
         ...
 
     def usage(self) -> tuple[int, int]:
@@ -341,7 +358,24 @@ def run_calendar(
                 )
                 continue
 
-            intent = llm.extract(message)
+            try:
+                intent = llm.extract(message)
+            except ExtractionError as e:
+                # Capture-don't-raise (DP1): a transient backend fault or a
+                # model-output defect for one message must not abort the batch.
+                # Mirrors the create_event failure capture below. Permanent
+                # faults (bad key, malformed request) are not wrapped as
+                # ExtractionError by the extractor, so they propagate here and
+                # abort the run loudly rather than marking every message failed.
+                outcomes.append(
+                    CalendarOutcome(
+                        message,
+                        MeetingIntent(has_meeting=False),
+                        "failed",
+                        error=str(e),
+                    )
+                )
+                continue
 
             if not intent.has_meeting:
                 outcomes.append(CalendarOutcome(message, intent, "skipped"))

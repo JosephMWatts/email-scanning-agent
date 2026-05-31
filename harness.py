@@ -228,6 +228,31 @@ def count_failed_runs(vault_path: str, agent_id: str) -> int:
     return failed
 
 
+def compute_run_status(progressed: int, failed: int) -> str:
+    """Map a batch's per-message outcome to the run-log status that governs
+    watermark advance. Pure: no I/O.
+
+    read_last_success only treats a `status: success` run as a watermark, so the
+    status returned here decides whether the dynamic fetch window rolls forward
+    past the messages this run saw. Returns "failed" only when failures occurred
+    and nothing progressed — every extract attempt failed — so the watermark is
+    held and the next run re-fetches the same window for retry; cross-run dedup
+    absorbs the re-proposed successes and conflict detection protects already-
+    created events. A single failure amid real progress still returns "success":
+    one transient blip is tolerated, and the operator sees the failed count in
+    output_summary. All-zeros (a clean fetch with nothing to do) is "success" —
+    there is no failure to hold the cursor for.
+
+    `progressed` counts messages that completed an extract this run (created +
+    proposed + skipped); duplicates are excluded — a dedup-skip needs no
+    reprocessing but must not mask a co-occurring failure from this guard. The
+    yellow-to-green redundancy carry-over from the Deliverable 1.5 gap-check: a
+    degraded run stays visible instead of silently advancing the cursor."""
+    if failed > 0 and progressed == 0:
+        return "failed"
+    return "success"
+
+
 def compute_fetch_window(
     last_success: datetime | None,
     now: datetime,
