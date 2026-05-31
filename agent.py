@@ -208,7 +208,7 @@ class CalendarOutcome:
 
     message: MailMessage
     intent: MeetingIntent
-    disposition: str                # "created" | "proposed" | "conflict" | "skipped" | "failed"
+    disposition: str                # "created" | "proposed" | "conflict" | "duplicate" | "skipped" | "failed"
     event_id: Optional[str] = None  # set when disposition == "created"
     conflict_titles: list[str] = field(default_factory=list)
     error: Optional[str] = None     # set when disposition == "failed"
@@ -280,6 +280,7 @@ def _proposal_row(outcome: CalendarOutcome) -> CalendarProposalRow:
         conflict="; ".join(outcome.conflict_titles),
         source_sender=outcome.message.sender,
         source_subject=outcome.message.subject,
+        source_email_id=outcome.message.message_id,
     )
 
 
@@ -321,8 +322,25 @@ def run_calendar(
     try:
         messages = source.fetch(scope)
 
+        # Dedup read: every source email id a prior run already proposed. A
+        # message whose id is in here is skipped before the (paid) extract call,
+        # so we never re-propose the same email twice across runs.
+        already_proposed = proposals_sink.read_proposed_email_ids()
+
         outcomes: list[CalendarOutcome] = []
         for message in messages:
+            if message.message_id in already_proposed:
+                # Already surfaced in a prior run's proposals file. Skip before
+                # llm.extract so a re-fetched email costs nothing.
+                outcomes.append(
+                    CalendarOutcome(
+                        message,
+                        MeetingIntent(has_meeting=False),
+                        "duplicate",
+                    )
+                )
+                continue
+
             intent = llm.extract(message)
 
             if not intent.has_meeting:
@@ -378,13 +396,29 @@ def run_calendar(
         ]
         proposal_path: Optional[str] = None
         if proposal_rows:
+            # Self-pruning union (decision ②): the ids proposed/conflicted this
+            # run, plus prior ids that were re-fetched this run. Prior ids NOT
+            # re-fetched fall out — pruned — so the dedup set never grows without
+            # bound as the fetch window rolls forward.
+            # Propose-only dedup: this ledger tracks ids surfaced to the
+            # operator, so the filter is ("proposed", "conflict") only. "created"
+            # is intentionally excluded — created events are protected from
+            # re-creation separately, by calendar conflict detection on the next
+            # run's re-extract, not by this ledger. Do not widen the filter to
+            # include "created" without revisiting that protection.
+            fetched_ids = {m.message_id for m in messages}
+            ids_to_persist = {
+                o.message.message_id
+                for o in outcomes
+                if o.disposition in ("proposed", "conflict")
+            } | (already_proposed & fetched_ids)
             run_meta = {
                 "timestamp": datetime.now(),
                 "scope": scope,
                 "count": len(proposal_rows),
             }
             proposal_path = proposals_sink.write_calendar_proposals(
-                proposal_rows, run_meta
+                proposal_rows, run_meta, proposed_email_ids=ids_to_persist
             )
     finally:
         writer.disconnect()
@@ -396,6 +430,7 @@ def run_calendar(
         "fetched": len(messages),
         "created": len(created),
         "proposed": len(proposal_rows),
+        "duplicate": sum(o.disposition == "duplicate" for o in outcomes),
         "skipped": sum(o.disposition == "skipped" for o in outcomes),
         "failed": sum(o.disposition == "failed" for o in outcomes),
         "created_event_ids": [o.event_id for o in created],

@@ -181,6 +181,66 @@ class MarkdownVault(VaultStore):
 
         return ReviewQueue(is_ready=is_ready, rows=rows)
 
+    def read_proposed_email_ids(self) -> set[str]:
+        """Return the set of source email ids already proposed, parsed from the
+        `proposed_email_ids:` frontmatter block list in <vault root>/Calendar
+        Agent/Proposed Events.md.
+
+        Strictly read-only: an absent proposals file is a valid empty state and
+        yields an empty set — no file is created or written here, mirroring the
+        absent-file no-op pattern of read_review_queue. Only the leading
+        frontmatter block (between the first two `---` fences) is scanned; a
+        stray `proposed_email_ids:` in the body is ignored. The key may be an
+        empty inline list (`proposed_email_ids: []`) or a block list of `-`
+        items; each item is unquoted on read so it round-trips what
+        write_calendar_proposals emitted."""
+        path = os.path.join(self._root, _CALENDAR_FOLDER, _PROPOSALS_FILE)
+        if not os.path.isfile(path):
+            return set()
+
+        with open(path, "r", encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+
+        # Bound the scan to the leading frontmatter block: the first `---` opens
+        # it, the next `---` closes it. No opening fence → no frontmatter.
+        if not lines or lines[0].strip() != "---":
+            return set()
+        end = None
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                end = i
+                break
+        if end is None:
+            return set()
+
+        ids: set[str] = set()
+        in_block = False  # consuming `- ` items under proposed_email_ids:?
+        for line in lines[1:end]:
+            stripped = line.strip()
+            if not in_block:
+                if stripped.startswith("proposed_email_ids:"):
+                    rest = stripped[len("proposed_email_ids:"):].strip()
+                    if rest and rest != "[]":
+                        # Inline form, e.g. proposed_email_ids: [a, b].
+                        inner = rest.strip("[]")
+                        for part in inner.split(","):
+                            val = self._unquote(part.strip())
+                            if val:
+                                ids.add(val)
+                    elif not rest:
+                        # Block form: the `- ` items follow on later lines.
+                        in_block = True
+                continue
+            if stripped.startswith("-"):
+                val = self._unquote(stripped[1:].strip())
+                if val:
+                    ids.add(val)
+            else:
+                # First non-item line ends the block list.
+                break
+
+        return ids
+
     # --- write -----------------------------------------------------------
 
     def write_scan_digest(self, rows: list[DigestRow], run_meta: dict) -> str:
@@ -209,18 +269,26 @@ class MarkdownVault(VaultStore):
         return os.path.abspath(path)
 
     def write_calendar_proposals(
-        self, rows: list[CalendarProposalRow], run_meta: dict
+        self,
+        rows: list[CalendarProposalRow],
+        run_meta: dict,
+        proposed_email_ids: set[str],
     ) -> str:
         """Write the calendar agent's propose-only events as a single rolling,
         hand-reviewable markdown file under <vault root>/Calendar Agent/. Return
         its absolute path. Overwrites on each call, mirroring write_review_queue.
-        Satisfies the ProposalsSink seam (criterion E1)."""
+        Satisfies the ProposalsSink seam (criterion E1).
+
+        proposed_email_ids is the file-level dedup set the runtime hands in: the
+        self-pruning union of source email ids this file should be treated as
+        having already proposed. It is persisted as a frontmatter block list
+        (file-level, not per-row) and read back by read_proposed_email_ids."""
         cal_dir = os.path.join(self._root, _CALENDAR_FOLDER)
         os.makedirs(cal_dir, exist_ok=True)
         path = os.path.join(cal_dir, _PROPOSALS_FILE)
 
         with open(path, "w", encoding="utf-8") as fh:
-            fh.write(self._render_proposals(rows, run_meta))
+            fh.write(self._render_proposals(rows, run_meta, proposed_email_ids))
         return os.path.abspath(path)
 
     def append_rule(self, sender: str, rule: str, source: str) -> None:
@@ -390,7 +458,10 @@ class MarkdownVault(VaultStore):
         return "\n".join(lines) + "\n"
 
     def _render_proposals(
-        self, rows: list[CalendarProposalRow], run_meta: dict
+        self,
+        rows: list[CalendarProposalRow],
+        run_meta: dict,
+        proposed_email_ids: set[str],
     ) -> str:
         ts = run_meta["timestamp"]
         created = ts.strftime("%Y-%m-%d %H:%M")
@@ -401,6 +472,17 @@ class MarkdownVault(VaultStore):
             "type: calendar-agent-proposals",
             f"created: {created}",
             f"events: {count}",
+        ]
+        # File-level dedup set as a frontmatter block list. Sorted for stable,
+        # diff-friendly output; quoted so message ids round-trip verbatim.
+        if proposed_email_ids:
+            lines.append("proposed_email_ids:")
+            lines.extend(
+                f"- {self._quote(eid)}" for eid in sorted(proposed_email_ids)
+            )
+        else:
+            lines.append("proposed_email_ids: []")
+        lines += [
             "---",
             "",
             "# Proposed events",
@@ -432,3 +514,19 @@ class MarkdownVault(VaultStore):
         """Collapse all whitespace and escape pipes so a table row never breaks."""
         collapsed = " ".join(str(text).split())
         return collapsed.replace("|", r"\|")
+
+    @staticmethod
+    def _quote(text: str) -> str:
+        """Double-quote a frontmatter scalar with minimal escaping so message
+        ids (which carry `<`, `>`, `@`, `:`) round-trip as YAML plain text."""
+        escaped = str(text).replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+
+    @staticmethod
+    def _unquote(text: str) -> str:
+        """Inverse of _quote: strip surrounding double quotes and unescape. A
+        bare, unquoted value passes through unchanged so hand-edited files still
+        parse."""
+        if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+            return text[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+        return text

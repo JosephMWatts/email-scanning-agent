@@ -90,7 +90,8 @@ def main() -> None:
 
     output_summary = (
         f"{result['created']} created, {result['proposed']} proposed, "
-        f"{result['skipped']} skipped, {result['failed']} failed"
+        f"{result['duplicate']} duplicate, {result['skipped']} skipped, "
+        f"{result['failed']} failed"
     )
     # Real path from the orchestration result — no hardcoded vault-relative
     # literal. Empty list when nothing was proposed.
@@ -114,10 +115,11 @@ def main() -> None:
     )
 
     print(f"Scanned {result['fetched']} message(s) for scope {SCOPE}")
-    print(f"Created:  {result['created']}")
-    print(f"Proposed: {result['proposed']}")
-    print(f"Skipped:  {result['skipped']}")
-    print(f"Failed:   {result['failed']}")
+    print(f"Created:   {result['created']}")
+    print(f"Proposed:  {result['proposed']}")
+    print(f"Duplicate: {result['duplicate']}")
+    print(f"Skipped:   {result['skipped']}")
+    print(f"Failed:    {result['failed']}")
     if result["proposal_path"]:
         print(f"Proposals written to: {result['proposal_path']}")
 

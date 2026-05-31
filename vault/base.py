@@ -23,6 +23,7 @@ class CalendarProposalRow:
     conflict: str          # conflicting event titles, "; "-joined; "" if clear
     source_sender: str     # the email that triggered the proposal
     source_subject: str    # that email's subject line
+    source_email_id: str   # that email's opaque message id; the dedup key
 
 
 class ProposalsSink(Protocol):
@@ -31,11 +32,27 @@ class ProposalsSink(Protocol):
     concerns; MarkdownVault structurally satisfies both (criterion E1)."""
 
     def write_calendar_proposals(
-        self, rows: list["CalendarProposalRow"], run_meta: dict
+        self,
+        rows: list["CalendarProposalRow"],
+        run_meta: dict,
+        proposed_email_ids: set[str],
     ) -> str:
         """Write the propose-only calendar events as one hand-reviewable
         markdown file and return the absolute path written. run_meta carries
-        run-level metadata only — timestamp, scope, event count."""
+        run-level metadata only — timestamp, scope, event count.
+
+        proposed_email_ids is the file-level dedup set persisted in frontmatter:
+        every source email id this file should be treated as having already
+        proposed. The runtime owns the self-pruning union it passes here; the
+        sink only records it verbatim and reads it back via
+        read_proposed_email_ids."""
+        ...
+
+    def read_proposed_email_ids(self) -> set[str]:
+        """Return the set of source email ids already proposed in a prior run,
+        parsed from the proposals file's frontmatter. An absent file is a valid
+        empty state and yields an empty set — strictly read-only, never created
+        here. This is the dedup-read half of the propose-only seam."""
         ...
 
 
