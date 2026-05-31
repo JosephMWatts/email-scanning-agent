@@ -13,7 +13,9 @@ MailSource, CalendarWriter, MeetingExtractor and ProposalsSink by injection and
 never imports these.
 """
 
+import argparse
 import os
+import sys
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -25,7 +27,9 @@ from llm.claude_extractor import ClaudeMeetingExtractor
 from mail.imap_source import ImapSource
 from vault.markdown_vault import MarkdownVault
 
-SCOPE = {"since_days": 3, "folder": "INBOX"}
+# Mailbox folder is fixed; the fetch window is computed per run (Option C
+# dynamic window) or set by the --since-days override.
+FOLDER = "INBOX"
 
 # Above this meeting-intent confidence, a conflict-free event is auto-created;
 # at or below it the event is routed to the propose-only queue instead. Tunable
@@ -36,8 +40,78 @@ AGENT_ID = "calendar-agent"
 AGENT_VERSION = "1.0.0"
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run the A6 calendar agent over recent mail."
+    )
+    parser.add_argument(
+        "--since-days",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Override the dynamic fetch window with a fixed N-day lookback. "
+            "Takes precedence over the last_success → now computation; used for "
+            "manual catch-up."
+        ),
+    )
+    return parser.parse_args()
+
+
+def _summarize_window(window: harness.WindowResult) -> str:
+    """Window-aware input_summary, e.g. 'INBOX, since_days=2 (dynamic, recovered
+    31.2h)'. Records how the window was derived for run-log review."""
+    if window.override:
+        mode = "override"
+    elif window.first_run:
+        mode = "first-run"
+    else:
+        mode = "dynamic"
+
+    parts = [mode]
+    if window.recovered_hours is not None:
+        parts.append(f"recovered {window.recovered_hours:.1f}h")
+    if window.capped:
+        parts.append("capped at 7d")
+    if window.gap:
+        parts.append("gap")
+    return f"{FOLDER}, since_days={window.since_days} ({', '.join(parts)})"
+
+
+def _gap_check_note(
+    window: harness.WindowResult, vault_path: str
+) -> str:
+    """The run-log notes string for window anomalies, or "" when there is
+    nothing to flag. Suppressed on the operator-override path (DP3). The
+    all-failed sentinel (DP5) is louder than a pure genesis first run: it means
+    prior runs existed but none succeeded, so a 24h fallback could silently miss
+    older mail those runs were meant to cover."""
+    if window.override:
+        return ""
+
+    if window.first_run:
+        failed = harness.count_failed_runs(vault_path, AGENT_ID)
+        if failed > 0:
+            return (
+                f"gap-check: no successful watermark despite {failed} prior "
+                f"failed attempts; fetched since_days={window.since_days} fallback"
+            )
+        # Pure genesis — zero prior logs of any status. Nothing to flag.
+        return ""
+
+    if window.gap:
+        capped = ", capped at 7d" if window.capped else ""
+        return (
+            f"gap-check: recovered window {window.recovered_hours:.1f}h exceeds "
+            f"{int(harness.GAP_CHECK_HOURS)}h threshold (possible missed "
+            f"scheduled fire); fetched since_days={window.since_days}{capped}"
+        )
+    return ""
+
+
 def main() -> None:
     load_dotenv()
+    args = _parse_args()
     vault_path = os.environ["VAULT_PATH"]
     # Which calendar receives auto-created events. Required, no silent default:
     # writing to the wrong calendar is worse than failing loud at startup.
@@ -47,12 +121,26 @@ def main() -> None:
     # would set TRIGGER=scheduled in EnvironmentVariables to flip this.
     trigger = os.environ.get("TRIGGER", "manual")
 
+    # Dynamic fetch window: read the latest successful watermark and compute
+    # last_success → now, unless --since-days overrides it. now is tz-aware to
+    # match the run-log's completed_at on subtraction.
+    last_success = harness.read_last_success(vault_path, AGENT_ID)
+    window = harness.compute_fetch_window(
+        last_success,
+        datetime.now().astimezone(),
+        override_days=args.since_days,
+    )
+    scope = {"since_days": window.since_days, "folder": FOLDER}
+
     source = ImapSource()
     writer = EventKitWriter()
     llm = ClaudeMeetingExtractor(calendar_id=target_calendar_id)
     sink = MarkdownVault(vault_path)
 
-    input_summary = f"{SCOPE['folder']}, since_days={SCOPE['since_days']}"
+    input_summary = _summarize_window(window)
+    note = _gap_check_note(window, vault_path)
+    if note:
+        print(note, file=sys.stderr)
 
     started_at = datetime.now().astimezone()
     try:
@@ -60,7 +148,7 @@ def main() -> None:
             source,
             writer,
             llm,
-            SCOPE,
+            scope,
             CONFIDENCE_THRESHOLD,
             target_calendar_id,
             sink,
@@ -84,6 +172,7 @@ def main() -> None:
             # labeled handoff is the right V2 design once A6 actually consumes a
             # Flow A artifact rather than re-reading the inbox.
             parent_run_id=None,
+            notes=note,
         )
         raise
     completed_at = datetime.now().astimezone()
@@ -109,12 +198,13 @@ def main() -> None:
         output_summary=output_summary,
         output_paths=output_paths,
         parent_run_id=None,  # V1: standalone run — see the failed-path comment.
+        notes=note,
         model_id=result["model_id"],
         token_cost_input=result["token_cost_input"],
         token_cost_output=result["token_cost_output"],
     )
 
-    print(f"Scanned {result['fetched']} message(s) for scope {SCOPE}")
+    print(f"Scanned {result['fetched']} message(s) for scope {scope}")
     print(f"Created:   {result['created']}")
     print(f"Proposed:  {result['proposed']}")
     print(f"Duplicate: {result['duplicate']}")
