@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from math import ceil
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 HOST = "personal"
 
 # --- fetch-window recovery (Option C dynamic window) -------------------------
@@ -80,8 +80,13 @@ def write_run_log(
     model_id: str | None = None,
     token_cost_input: int | None = None,
     token_cost_output: int | None = None,
+    token_cost_input_base: int | None = None,
+    token_cost_input_cache_read: int | None = None,
+    token_cost_input_cache_write: int | None = None,
+    token_cost_thinking: int | None = None,
+    batch: bool = False,
 ) -> str:
-    """Write a v1 harness run-log to <vault_path>/Agent Runs/. Returns the path written."""
+    """Write a harness run-log to <vault_path>/Agent Runs/. Returns the path written."""
     tags = tags or []
 
     slug = agent_id.replace("-", "")
@@ -100,8 +105,30 @@ def write_run_log(
     error_field = "null" if error is None else _yaml_quote(error)
     parent_field = "null" if parent_run_id is None else _yaml_quote(parent_run_id)
     model_field = "null" if model_id is None else _yaml_quote(model_id)
-    token_in_field = "null" if token_cost_input is None else str(token_cost_input)
-    token_out_field = "null" if token_cost_output is None else str(token_cost_output)
+
+    # Schema 3: when any cache-aware input breakdown field is supplied, the
+    # emitted token_cost_input is their sum so legacy readers still see a single
+    # input total; otherwise it is whatever the caller passed verbatim.
+    _input_breakdown = (
+        token_cost_input_base,
+        token_cost_input_cache_read,
+        token_cost_input_cache_write,
+    )
+    if any(v is not None for v in _input_breakdown):
+        effective_token_cost_input: int | None = sum(v or 0 for v in _input_breakdown)
+    else:
+        effective_token_cost_input = token_cost_input
+
+    def _int_or_null(value: int | None) -> str:
+        return "null" if value is None else str(value)
+
+    token_in_field = _int_or_null(effective_token_cost_input)
+    token_out_field = _int_or_null(token_cost_output)
+    token_in_base_field = _int_or_null(token_cost_input_base)
+    token_in_cache_read_field = _int_or_null(token_cost_input_cache_read)
+    token_in_cache_write_field = _int_or_null(token_cost_input_cache_write)
+    token_thinking_field = _int_or_null(token_cost_thinking)
+    batch_field = "true" if batch else "false"
 
     frontmatter = (
         "---\n"
@@ -122,6 +149,11 @@ def write_run_log(
         f"output_paths:{_yaml_list(rel_paths)}\n"
         f"token_cost_input: {token_in_field}\n"
         f"token_cost_output: {token_out_field}\n"
+        f"token_cost_input_base: {token_in_base_field}\n"
+        f"token_cost_input_cache_read: {token_in_cache_read_field}\n"
+        f"token_cost_input_cache_write: {token_in_cache_write_field}\n"
+        f"token_cost_thinking: {token_thinking_field}\n"
+        f"batch: {batch_field}\n"
         f"tags:{_yaml_list(tags)}\n"
         f"error: {error_field}\n"
         f"notes: {_yaml_quote(notes)}\n"
